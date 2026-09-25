@@ -1,111 +1,108 @@
-import * as vscode from 'vscode';
-import * as path from 'path';
-import { QuotaDataService } from './quotaDataService';
-import { ExtensionMessage, QuotaState, WebviewMessage } from './types';
-
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.QuotaPanel = void 0;
+const vscode = __importStar(require("vscode"));
 // ─────────────────────────────────────────────────────────────
 //  QuotaPanel  — VS Code Webview View Provider
 //  Renders the Liquid Glass quota dashboard in the sidebar.
 // ─────────────────────────────────────────────────────────────
-
-export class QuotaPanel implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'quotaTracker.panel';
-
-  private _view?: vscode.WebviewView;
-  private _disposables: vscode.Disposable[] = [];
-
-  constructor(
-    private readonly _extensionUri: vscode.Uri,
-    private readonly _service: QuotaDataService
-  ) {}
-
-  resolveWebviewView(
-    webviewView: vscode.WebviewView,
-    _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
-  ): void {
-    this._view = webviewView;
-
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this._extensionUri, 'media'),
-      ],
-    };
-
-    webviewView.webview.html = this._buildHtml(webviewView.webview);
-
-    // Listen for messages from the webview
-    this._disposables.push(
-      webviewView.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
-        switch (msg.type) {
-          case 'ready':
-            // Send current state immediately on load
-            this._postMessage({ type: 'stateUpdate', state: this._service.state });
-            this._postMessage({ type: 'settingsUpdate', settings: this._service.settings });
-            break;
-          case 'refresh':
-            await this._service.refresh();
-            break;
-          case 'setApiKey':
-            await vscode.workspace.getConfiguration('quotaTracker')
-              .update('apiKey', msg.key, vscode.ConfigurationTarget.Global);
-            await this._service.refresh();
-            break;
-          case 'setRefreshInterval':
-            await vscode.workspace.getConfiguration('quotaTracker')
-              .update('refreshInterval', msg.seconds, vscode.ConfigurationTarget.Global);
-            this._service.scheduleRefreshWithInterval(msg.seconds);
-            break;
-          case 'selectModel':
-            this._service.setActiveModel(msg.modelId);
-            break;
-        }
-      })
-    );
-
-    // Push state updates to webview
-    this._disposables.push(
-      this._service.onChange(state => {
+class QuotaPanel {
+    constructor(_extensionUri, _service) {
+        this._extensionUri = _extensionUri;
+        this._service = _service;
+        this._disposables = [];
+    }
+    resolveWebviewView(webviewView, _context, _token) {
+        this._view = webviewView;
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [
+                vscode.Uri.joinPath(this._extensionUri, 'media'),
+            ],
+        };
+        webviewView.webview.html = this._buildHtml(webviewView.webview);
+        // Listen for messages from the webview
+        this._disposables.push(webviewView.webview.onDidReceiveMessage(async (msg) => {
+            switch (msg.type) {
+                case 'ready':
+                    // Send current state immediately on load
+                    this._postMessage({ type: 'stateUpdate', state: this._service.state });
+                    this._postMessage({ type: 'settingsUpdate', settings: this._service.settings });
+                    break;
+                case 'refresh':
+                    await this._service.refresh();
+                    break;
+                case 'setApiKey':
+                    await vscode.workspace.getConfiguration('quotaTracker')
+                        .update('apiKey', msg.key, vscode.ConfigurationTarget.Global);
+                    await this._service.refresh();
+                    break;
+                case 'setRefreshInterval':
+                    await vscode.workspace.getConfiguration('quotaTracker')
+                        .update('refreshInterval', msg.seconds, vscode.ConfigurationTarget.Global);
+                    this._service.scheduleRefreshWithInterval(msg.seconds);
+                    break;
+            }
+        }));
+        // Push state updates to webview
+        this._disposables.push(this._service.onChange(state => {
+            this._postMessage({ type: 'stateUpdate', state });
+        }));
+        // Trigger first fetch
+        this._service.refresh();
+    }
+    sendState(state) {
         this._postMessage({ type: 'stateUpdate', state });
-      })
-    );
-
-    // Trigger first fetch
-    this._service.refresh();
-  }
-
-  sendState(state: QuotaState): void {
-    this._postMessage({ type: 'stateUpdate', state });
-  }
-
-  dispose(): void {
-    this._disposables.forEach(d => d.dispose());
-    this._disposables = [];
-  }
-
-  // ── Private ────────────────────────────────────────────────
-
-  private _postMessage(msg: ExtensionMessage): void {
-    this._view?.webview.postMessage(msg);
-  }
-
-  private _uri(...segments: string[]): vscode.Uri {
-    return this._view!.webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, ...segments)
-    );
-  }
-
-  private _buildHtml(webview: vscode.Webview): string {
-    const cssUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'panel.css')
-    );
-    const jsUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'panel.js')
-    );
-    const nonce = this._nonce();
-
-    return /* html */`<!DOCTYPE html>
+    }
+    dispose() {
+        this._disposables.forEach(d => d.dispose());
+        this._disposables = [];
+    }
+    // ── Private ────────────────────────────────────────────────
+    _postMessage(msg) {
+        this._view?.webview.postMessage(msg);
+    }
+    _uri(...segments) {
+        return this._view.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, ...segments));
+    }
+    _buildHtml(webview) {
+        const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'panel.css'));
+        const jsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'panel.js'));
+        const nonce = this._nonce();
+        return /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
@@ -332,14 +329,16 @@ export class QuotaPanel implements vscode.WebviewViewProvider {
 <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;
-  }
-
-  private _nonce(): string {
-    let text = '';
-    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    for (let i = 0; i < 32; i++) {
-      text += possible.charAt(Math.floor(Math.random() * possible.length));
     }
-    return text;
-  }
+    _nonce() {
+        let text = '';
+        const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        for (let i = 0; i < 32; i++) {
+            text += possible.charAt(Math.floor(Math.random() * possible.length));
+        }
+        return text;
+    }
 }
+exports.QuotaPanel = QuotaPanel;
+QuotaPanel.viewType = 'quotaTracker.panel';
+//# sourceMappingURL=quotaPanel.js.map

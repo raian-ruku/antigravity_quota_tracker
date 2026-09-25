@@ -4,14 +4,18 @@ import {
   ModelQuota,
   QuotaSnapshot,
   QuotaState,
+  QuotaGroup,
+  QuotaBucket,
   Tier,
   ExtensionSettings,
 } from "./types";
 import {
   discoverAntigravitySession,
   fetchLocalUserStatus,
+  fetchLocalUserQuotaSummary,
   AntigravitySession,
   ConnectUserStatusResponse,
+  ConnectUserQuotaSummaryResponse,
 } from "./antigravityProcessService";
 
 // ─────────────────────────────────────────────────────────────
@@ -29,6 +33,8 @@ export class QuotaDataService {
   private _state: QuotaState;
   private _context: vscode.ExtensionContext;
   private _refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private _activeModelCheckTimer: ReturnType<typeof setInterval> | undefined;
+  private _manualActiveModelId: string | null = null;
   private _session: AntigravitySession | null = null;
   private _onChangeEmitter = new vscode.EventEmitter<QuotaState>();
   public readonly onChange = this._onChangeEmitter.event;
@@ -37,6 +43,11 @@ export class QuotaDataService {
     this._context = context;
     this._state = this._loadCachedState();
     this._scheduleRefresh();
+
+    // Fast local poller (8s) to dynamically detect model switches in the Antigravity Agent
+    this._activeModelCheckTimer = setInterval(() => {
+      this.checkActiveModel();
+    }, 8000);
   }
 
   get state(): QuotaState {
@@ -50,6 +61,7 @@ export class QuotaDataService {
       refreshInterval: cfg.get<number>("refreshInterval", 60),
       statusBarMode: cfg.get<any>("statusBarMode", "compact"),
       statusBarVisible: cfg.get<boolean>("statusBarVisible", true),
+      focusModel: cfg.get<string>("focusModel", "auto"),
     };
   }
 
@@ -58,10 +70,19 @@ export class QuotaDataService {
 
     try {
       let models: ModelQuota[] | null = null;
+      let groups: QuotaGroup[] | undefined = undefined;
+      let userTierName: string | undefined = undefined;
+      let activeModelId: string | undefined = undefined;
+      let activeModelName: string | undefined = undefined;
 
       // 1. Primary: Query the local Antigravity Language Server daemon
       try {
-        models = await this._fetchLocalProcessQuotas();
+        const localResult = await this._fetchLocalProcessQuotas();
+        models = localResult.models;
+        groups = localResult.groups;
+        userTierName = localResult.userTierName;
+        activeModelId = localResult.activeModelId;
+        activeModelName = localResult.activeModelName;
       } catch (localErr: any) {
         console.warn("[QuotaTracker] Local process fetch failed:", localErr.message);
       }
@@ -77,7 +98,11 @@ export class QuotaDataService {
 
       // 3. Fallback: Demo data if neither is available
       if (!models || models.length === 0) {
-        models = this._generateDemoData();
+        const demo = this._generateDemoData();
+        models = demo.models;
+        groups = demo.groups;
+        activeModelId = activeModelId || demo.models[0]?.modelId;
+        activeModelName = activeModelName || demo.models[0]?.displayName;
       }
 
       const now = Date.now();
@@ -107,11 +132,15 @@ export class QuotaDataService {
 
       const newState: QuotaState = {
         models,
+        groups,
+        activeModelId,
+        activeModelName,
         history,
         totalCostUsd: totalCost,
         isLoading: false,
         error: null,
         lastFetched: now,
+        userTierName,
       };
 
       this._setState(newState);
@@ -122,6 +151,49 @@ export class QuotaDataService {
         isLoading: false,
         error: err.message ?? "Unknown error",
       });
+    }
+  }
+
+  public setActiveModel(modelId: string | null): void {
+    this._manualActiveModelId = modelId;
+    if (modelId) {
+      const found = this._state.models.find(m => m.modelId === modelId);
+      if (found) {
+        this._setState({
+          ...this._state,
+          activeModelId: found.modelId,
+          activeModelName: found.displayName,
+        });
+      }
+    } else {
+      this.checkActiveModel();
+    }
+  }
+
+  public async checkActiveModel(): Promise<void> {
+    if (!this._session) {
+      this._session = await discoverAntigravitySession();
+    }
+    if (!this._session) { return; }
+
+    try {
+      const statusResponse = await fetchLocalUserStatus(this._session);
+      const cascade = statusResponse?.userStatus?.cascadeModelConfigData;
+      if (!cascade) { return; }
+
+      const rawConfigs = cascade.clientModelConfigs || [];
+      const defaultOverride = cascade.defaultOverrideModelConfig;
+      const active = this._resolveActiveModel(rawConfigs, defaultOverride);
+
+      if (active.activeModelId && active.activeModelId !== this._state.activeModelId) {
+        this._setState({
+          ...this._state,
+          activeModelId: active.activeModelId,
+          activeModelName: active.activeModelName,
+        });
+      }
+    } catch {
+      // ignore quick check failure
     }
   }
 
@@ -138,6 +210,9 @@ export class QuotaDataService {
   dispose(): void {
     if (this._refreshTimer) {
       clearTimeout(this._refreshTimer);
+    }
+    if (this._activeModelCheckTimer) {
+      clearInterval(this._activeModelCheckTimer);
     }
     this._onChangeEmitter.dispose();
   }
@@ -165,8 +240,10 @@ export class QuotaDataService {
     if (cached) {
       return cached;
     }
+    const demo = this._generateDemoData();
     return {
-      models: this._generateDemoData(),
+      models: demo.models,
+      groups: demo.groups,
       history: {},
       totalCostUsd: 0,
       isLoading: false,
@@ -179,14 +256,14 @@ export class QuotaDataService {
     this._context.globalState.update(STATE_CACHE_KEY, state);
   }
 
-  private _loadHistory(): Record<ModelId, QuotaSnapshot[]> {
-    return this._context.globalState.get<Record<ModelId, QuotaSnapshot[]>>(
+  private _loadHistory(): Record<string, QuotaSnapshot[]> {
+    return this._context.globalState.get<Record<string, QuotaSnapshot[]>>(
       HISTORY_KEY,
       {} as any,
     );
   }
 
-  private _saveHistory(history: Record<ModelId, QuotaSnapshot[]>): void {
+  private _saveHistory(history: Record<string, QuotaSnapshot[]>): void {
     this._context.globalState.update(HISTORY_KEY, history);
   }
 
@@ -194,7 +271,13 @@ export class QuotaDataService {
   // Queries the local Antigravity Language Server process via Connect RPC
   // using x-codeium-csrf-token authentication.
 
-  private async _fetchLocalProcessQuotas(): Promise<ModelQuota[]> {
+  private async _fetchLocalProcessQuotas(): Promise<{
+    models: ModelQuota[];
+    groups: QuotaGroup[];
+    userTierName?: string;
+    activeModelId?: string;
+    activeModelName?: string;
+  }> {
     if (!this._session) {
       this._session = await discoverAntigravitySession();
     }
@@ -202,27 +285,232 @@ export class QuotaDataService {
       throw new Error("Antigravity language server process not found");
     }
 
-    let response: ConnectUserStatusResponse | null = null;
+    let statusResponse: ConnectUserStatusResponse | null = null;
+    let summaryResponse: ConnectUserQuotaSummaryResponse | null = null;
+
     try {
-      response = await fetchLocalUserStatus(this._session);
+      const results = await Promise.allSettled([
+        fetchLocalUserStatus(this._session),
+        fetchLocalUserQuotaSummary(this._session),
+      ]);
+      if (results[0].status === "fulfilled") {
+        statusResponse = results[0].value;
+      }
+      if (results[1].status === "fulfilled") {
+        summaryResponse = results[1].value;
+      }
     } catch (err) {
       // Re-discover if port or token changed (e.g. IDE restart)
       this._session = await discoverAntigravitySession();
       if (this._session) {
-        response = await fetchLocalUserStatus(this._session);
+        const results = await Promise.allSettled([
+          fetchLocalUserStatus(this._session),
+          fetchLocalUserQuotaSummary(this._session),
+        ]);
+        if (results[0].status === "fulfilled") {
+          statusResponse = results[0].value;
+        }
+        if (results[1].status === "fulfilled") {
+          summaryResponse = results[1].value;
+        }
       } else {
         throw err;
       }
     }
 
-    if (!response || !response.userStatus) {
+    if (!statusResponse || !statusResponse.userStatus) {
       throw new Error("Invalid response from Antigravity language server");
     }
 
-    return this._mapConnectResponse(response);
+    const groups = this._mapQuotaGroups(summaryResponse);
+    const userTierName = statusResponse.userStatus?.userTier?.name;
+    const models = this._mapConnectResponse(statusResponse, groups);
+
+    const cascade = statusResponse.userStatus?.cascadeModelConfigData;
+    const active = this._resolveActiveModel(
+      cascade?.clientModelConfigs || [],
+      cascade?.defaultOverrideModelConfig
+    );
+
+    return {
+      models,
+      groups,
+      userTierName,
+      activeModelId: active.activeModelId,
+      activeModelName: active.activeModelName,
+    };
   }
 
-  private _mapConnectResponse(data: ConnectUserStatusResponse): ModelQuota[] {
+  private _resolveActiveModel(
+    rawConfigs: any[],
+    defaultOverride?: any
+  ): { activeModelId?: string; activeModelName?: string } {
+    if (this._manualActiveModelId) {
+      const manualMatch = this._state?.models?.find((m) => m.modelId === this._manualActiveModelId);
+      if (manualMatch) {
+        return { activeModelId: manualMatch.modelId, activeModelName: manualMatch.displayName };
+      }
+    }
+
+    const focusSetting = this.settings.focusModel;
+    if (focusSetting && focusSetting !== "auto") {
+      const manualMatch = this._state?.models?.find(
+        (m) =>
+          m.modelId === focusSetting ||
+          m.displayName.toLowerCase().includes(focusSetting.toLowerCase())
+      );
+      if (manualMatch) {
+        return { activeModelId: manualMatch.modelId, activeModelName: manualMatch.displayName };
+      }
+    }
+
+    if (!defaultOverride) {
+      return {};
+    }
+
+    const targetModel =
+      defaultOverride.modelOrAlias?.model ||
+      defaultOverride.modelId ||
+      defaultOverride.model;
+    const targetAlias =
+      defaultOverride.modelOrAlias?.alias ||
+      defaultOverride.alias;
+
+    if (targetModel) {
+      const match = rawConfigs.find(
+        (c) =>
+          c.modelOrAlias?.model === targetModel ||
+          c.modelId === targetModel ||
+          c.modelOrAlias?.alias === targetModel
+      );
+      if (match) {
+        return {
+          activeModelId: match.modelId || match.label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+          activeModelName: match.label,
+        };
+      }
+    }
+
+    if (targetAlias) {
+      const match = rawConfigs.find(
+        (c) =>
+          c.modelOrAlias?.alias === targetAlias ||
+          c.modelId === targetAlias ||
+          c.label.toLowerCase().includes(targetAlias.toLowerCase())
+      );
+      if (match) {
+        return {
+          activeModelId: match.modelId || match.label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+          activeModelName: match.label,
+        };
+      }
+    }
+
+    return {};
+  }
+
+  private _mapQuotaGroups(
+    data: ConnectUserQuotaSummaryResponse | null
+  ): QuotaGroup[] {
+    const rawGroups = data?.response?.groups;
+    if (!rawGroups || !Array.isArray(rawGroups) || rawGroups.length === 0) {
+      return this._generateDemoGroups(Date.now());
+    }
+
+    const now = Date.now();
+    return rawGroups.map((g) => {
+      const buckets: QuotaBucket[] = (g.buckets || []).map((b) => {
+        const remainingFraction =
+          typeof b.remainingFraction === "number"
+            ? b.remainingFraction
+            : b.remaining?.value ?? (b as any).remaining_fraction ?? 1.0;
+        const usedFraction = Math.max(0, Math.min(1, 1 - remainingFraction));
+        const usedPercent = Math.round(usedFraction * 100);
+
+        const resetMs = b.resetTime
+          ? new Date(b.resetTime).getTime()
+          : b.reset_time
+          ? new Date(b.reset_time).getTime()
+          : now + 7 * 24 * 3600000;
+
+        const window =
+          b.window ||
+          (b.bucketId?.toLowerCase().includes("weekly")
+            ? "weekly"
+            : b.bucketId?.toLowerCase().includes("5h")
+            ? "5h"
+            : "weekly");
+
+        return {
+          bucketId: b.bucketId || "bucket-" + Math.random().toString(36).slice(2),
+          displayName:
+            b.displayName ||
+            (window === "weekly" ? "Weekly Limit Remaining" : "5-Hour Limit Remaining"),
+          description: b.description,
+          window,
+          remainingFraction,
+          usedPercent,
+          resetTimestamp: resetMs,
+        };
+      });
+
+      return {
+        displayName: g.displayName || "Model Group",
+        description: g.description,
+        buckets,
+      };
+    });
+  }
+
+  private _findGroupForModel(
+    modelLabel: string,
+    groups: QuotaGroup[]
+  ): QuotaGroup | undefined {
+    const lower = modelLabel.toLowerCase();
+
+    // Check Gemini
+    if (lower.includes("gemini")) {
+      const match = groups.find(
+        (g) =>
+          g.displayName.toLowerCase().includes("gemini") ||
+          (g.description || "").toLowerCase().includes("gemini")
+      );
+      if (match) return match;
+    }
+
+    // Check Claude or GPT
+    if (
+      lower.includes("claude") ||
+      lower.includes("gpt") ||
+      lower.includes("sonnet") ||
+      lower.includes("opus") ||
+      lower.includes("oss")
+    ) {
+      const match = groups.find(
+        (g) =>
+          g.displayName.toLowerCase().includes("claude") ||
+          g.displayName.toLowerCase().includes("gpt") ||
+          (g.description || "").toLowerCase().includes("claude") ||
+          (g.description || "").toLowerCase().includes("gpt")
+      );
+      if (match) return match;
+    }
+
+    // Generic match
+    return groups.find((g) => {
+      const desc = (g.description || "").toLowerCase();
+      const name = g.displayName.toLowerCase();
+      const words = lower.split(/[\s\-()]+/);
+      return words.some(
+        (w) => w.length > 2 && (name.includes(w) || desc.includes(w))
+      );
+    });
+  }
+
+  private _mapConnectResponse(
+    data: ConnectUserStatusResponse,
+    groups: QuotaGroup[] = []
+  ): ModelQuota[] {
     const userStatus = data.userStatus;
     const configs = userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
     const userTierName = userStatus?.userTier?.name?.toLowerCase() || "";
@@ -250,6 +538,15 @@ export class QuotaDataService {
         tier = "pro";
       }
 
+      // Map group and weekly bucket
+      const matchedGroup = this._findGroupForModel(c.label, groups);
+      const weeklyBucket = matchedGroup?.buckets.find(
+        (b) =>
+          b.window === "weekly" ||
+          b.bucketId.toLowerCase().includes("weekly") ||
+          b.displayName.toLowerCase().includes("weekly")
+      );
+
       return {
         modelId: c.modelId || c.label.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
         displayName: c.label,
@@ -269,6 +566,9 @@ export class QuotaDataService {
         estimatedCostUsd: 0,
         resetTimestamp: resetMs,
         lastUpdated: now,
+        weeklyRemainingFraction: weeklyBucket ? weeklyBucket.remainingFraction : undefined,
+        weeklyResetTimestamp: weeklyBucket ? weeklyBucket.resetTimestamp : undefined,
+        groupName: matchedGroup ? matchedGroup.displayName : undefined,
       };
     });
   }
@@ -276,7 +576,6 @@ export class QuotaDataService {
   // ── API Fetch ────────────────────────────────────────────
   // Attempts to fetch from Antigravity quota endpoint.
   // If the API structure changes, update response parsing here.
-
 
   private async _fetchFromApi(apiKey: string): Promise<ModelQuota[]> {
     const url = "https://generativelanguage.googleapis.com/v1/quota";
@@ -289,11 +588,10 @@ export class QuotaDataService {
     });
 
     if (!response.ok) {
-      // Fallback to demo data with an error note
       console.warn(
         `[QuotaTracker] API returned ${response.status}, using demo data`,
       );
-      return this._generateDemoData();
+      return this._generateDemoData().models;
     }
 
     const json = (await response.json()) as any;
@@ -301,12 +599,10 @@ export class QuotaDataService {
   }
 
   private _parseApiResponse(json: any): ModelQuota[] {
-    // Adapt this to the actual Antigravity quota API response shape
     if (Array.isArray(json?.quotas)) {
       return json.quotas.map((q: any) => this._mapQuota(q));
     }
-    // Fallback
-    return this._generateDemoData();
+    return this._generateDemoData().models;
   }
 
   private _mapQuota(q: any): ModelQuota {
@@ -335,68 +631,157 @@ export class QuotaDataService {
 
   // ── Demo / Mock Data ──────────────────────────────────────
 
-  private _generateDemoData(): ModelQuota[] {
-    const now = Date.now();
-    const resetIn2h = now + 2 * 60 * 60 * 1000;
-    const resetIn6h = now + 6 * 60 * 60 * 1000;
-    const resetIn24h = now + 24 * 60 * 60 * 1000;
+  private _generateDemoGroups(now: number): QuotaGroup[] {
+    const weeklyResetGemini = now + (6 * 24 + 10) * 3600 * 1000;
+    const weeklyResetClaude = now + (6 * 24 + 8) * 3600 * 1000;
+    const fiveHResetGemini = now + 4 * 3600 * 1000 + 46 * 60 * 1000;
+    const fiveHResetClaude = now + 1 * 3600 * 1000 + 9 * 60 * 1000;
 
     return [
       {
-        modelId: "gemini-2.5-flash",
-        displayName: "Gemini 2.5 Flash",
-        tier: "free",
-        requests: { used: 1248, limit: 1500 },
-        tokensIn: { used: 824300, limit: 1000000 },
-        tokensOut: { used: 312100, limit: 500000 },
-        estimatedCostUsd: 0,
-        resetTimestamp: resetIn2h,
-        lastUpdated: now,
+        displayName: "Gemini Models",
+        description: "Models within this group: Gemini Flash, Gemini Pro",
+        buckets: [
+          {
+            bucketId: "gemini-weekly",
+            displayName: "Weekly Limit Remaining",
+            description: "You have used some of your weekly limit, it will fully refresh in 6 days, 10 hours.",
+            window: "weekly",
+            remainingFraction: 0.991,
+            usedPercent: 1,
+            resetTimestamp: weeklyResetGemini,
+          },
+          {
+            bucketId: "gemini-5h",
+            displayName: "Five Hour Limit Remaining",
+            description: "You have used some of your 5-hour limit, it will fully refresh in 4 hours, 46 minutes.",
+            window: "5h",
+            remainingFraction: 0.984,
+            usedPercent: 2,
+            resetTimestamp: fiveHResetGemini,
+          },
+        ],
       },
       {
-        modelId: "gemini-2.5-pro",
-        displayName: "Gemini 2.5 Pro",
-        tier: "pro",
-        requests: { used: 342, limit: 2000 },
-        tokensIn: { used: 1820000, limit: 5000000 },
-        tokensOut: { used: 490000, limit: 2000000 },
-        estimatedCostUsd: 4.27,
-        resetTimestamp: resetIn6h,
-        lastUpdated: now,
-      },
-      {
-        modelId: "gemini-2.0-flash",
-        displayName: "Gemini 2.0 Flash",
-        tier: "free",
-        requests: { used: 89, limit: 500 },
-        tokensIn: { used: 45200, limit: 250000 },
-        tokensOut: { used: 12800, limit: 100000 },
-        estimatedCostUsd: 0,
-        resetTimestamp: resetIn24h,
-        lastUpdated: now,
-      },
-      {
-        modelId: "gemini-ultra",
-        displayName: "Gemini Ultra",
-        tier: "enterprise",
-        requests: { used: 28, limit: 100 },
-        tokensIn: { used: 210000, limit: 1000000 },
-        tokensOut: { used: 78000, limit: 400000 },
-        estimatedCostUsd: 18.9,
-        resetTimestamp: resetIn6h,
-        lastUpdated: now,
-      },
-      {
-        modelId: "gemini-nano",
-        displayName: "Gemini Nano",
-        tier: "free",
-        requests: { used: 512, limit: 5000 },
-        tokensIn: { used: 92000, limit: 2000000 },
-        tokensOut: { used: 31000, limit: 800000 },
-        estimatedCostUsd: 0,
-        resetTimestamp: resetIn24h,
-        lastUpdated: now,
+        displayName: "Claude and GPT models",
+        description: "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+        buckets: [
+          {
+            bucketId: "3p-weekly",
+            displayName: "Weekly Limit Remaining",
+            description: "You have used some of your weekly limit, it will fully refresh in 6 days, 8 hours.",
+            window: "weekly",
+            remainingFraction: 0.549,
+            usedPercent: 45,
+            resetTimestamp: weeklyResetClaude,
+          },
+          {
+            bucketId: "3p-5h",
+            displayName: "Five Hour Limit Remaining",
+            description: "You have used some of your 5-hour limit, it will fully refresh in 1 hour, 9 minutes.",
+            window: "5h",
+            remainingFraction: 0.652,
+            usedPercent: 35,
+            resetTimestamp: fiveHResetClaude,
+          },
+        ],
       },
     ];
+  }
+
+  private _generateDemoData(): { models: ModelQuota[]; groups: QuotaGroup[] } {
+    const now = Date.now();
+    const groups = this._generateDemoGroups(now);
+    const geminiWeekly = groups[0].buckets[0];
+    const claudeWeekly = groups[1].buckets[0];
+
+    const models: ModelQuota[] = [
+      {
+        modelId: "gemini-3.8-flash-high",
+        displayName: "Gemini 3.8 Flash (High)",
+        tier: "pro",
+        requests: { used: 1, limit: 100 },
+        tokensIn: { used: 12000, limit: 1000000 },
+        tokensOut: { used: 4000, limit: 200000 },
+        estimatedCostUsd: 0,
+        resetTimestamp: groups[0].buckets[1].resetTimestamp,
+        lastUpdated: now,
+        weeklyRemainingFraction: geminiWeekly.remainingFraction,
+        weeklyResetTimestamp: geminiWeekly.resetTimestamp,
+        groupName: "Gemini Models",
+      },
+      {
+        modelId: "claude-sonnet-4-6",
+        displayName: "Claude Sonnet 4.6 (Thinking)",
+        tier: "pro",
+        requests: { used: 35, limit: 100 },
+        tokensIn: { used: 348000, limit: 1000000 },
+        tokensOut: { used: 69600, limit: 200000 },
+        estimatedCostUsd: 2.45,
+        resetTimestamp: groups[1].buckets[1].resetTimestamp,
+        lastUpdated: now,
+        weeklyRemainingFraction: claudeWeekly.remainingFraction,
+        weeklyResetTimestamp: claudeWeekly.resetTimestamp,
+        groupName: "Claude and GPT models",
+      },
+      {
+        modelId: "gemini-3.1-pro-high",
+        displayName: "Gemini 3.1 Pro (High)",
+        tier: "pro",
+        requests: { used: 2, limit: 100 },
+        tokensIn: { used: 16000, limit: 1000000 },
+        tokensOut: { used: 5200, limit: 200000 },
+        estimatedCostUsd: 0,
+        resetTimestamp: groups[0].buckets[1].resetTimestamp,
+        lastUpdated: now,
+        weeklyRemainingFraction: geminiWeekly.remainingFraction,
+        weeklyResetTimestamp: geminiWeekly.resetTimestamp,
+        groupName: "Gemini Models",
+      },
+      {
+        modelId: "gpt-oss-120b-medium",
+        displayName: "GPT-OSS 120B (Medium)",
+        tier: "pro",
+        requests: { used: 35, limit: 100 },
+        tokensIn: { used: 348000, limit: 1000000 },
+        tokensOut: { used: 69600, limit: 200000 },
+        estimatedCostUsd: 1.1,
+        resetTimestamp: groups[1].buckets[1].resetTimestamp,
+        lastUpdated: now,
+        weeklyRemainingFraction: claudeWeekly.remainingFraction,
+        weeklyResetTimestamp: claudeWeekly.resetTimestamp,
+        groupName: "Claude and GPT models",
+      },
+      {
+        modelId: "claude-opus-4-6-thinking",
+        displayName: "Claude Opus 4.6 (Thinking)",
+        tier: "enterprise",
+        requests: { used: 35, limit: 100 },
+        tokensIn: { used: 348000, limit: 1000000 },
+        tokensOut: { used: 69600, limit: 200000 },
+        estimatedCostUsd: 6.8,
+        resetTimestamp: groups[1].buckets[1].resetTimestamp,
+        lastUpdated: now,
+        weeklyRemainingFraction: claudeWeekly.remainingFraction,
+        weeklyResetTimestamp: claudeWeekly.resetTimestamp,
+        groupName: "Claude and GPT models",
+      },
+      {
+        modelId: "gemini-3.6-flash-medium",
+        displayName: "Gemini 3.6 Flash (Medium)",
+        tier: "pro",
+        requests: { used: 1, limit: 100 },
+        tokensIn: { used: 10000, limit: 1000000 },
+        tokensOut: { used: 3000, limit: 200000 },
+        estimatedCostUsd: 0,
+        resetTimestamp: groups[0].buckets[1].resetTimestamp,
+        lastUpdated: now,
+        weeklyRemainingFraction: geminiWeekly.remainingFraction,
+        weeklyResetTimestamp: geminiWeekly.resetTimestamp,
+        groupName: "Gemini Models",
+      },
+    ];
+
+    return { models, groups };
   }
 }

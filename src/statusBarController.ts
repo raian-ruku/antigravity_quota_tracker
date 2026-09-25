@@ -95,6 +95,79 @@ function shortChip(label: string): string {
   return label.replace(/[^A-Za-z0-9]/g, '').slice(0, 5);
 }
 
+/** Find the lowest weekly quota pool across groups or models */
+function lowestWeeklyInfo(state: QuotaState): { fraction: number; resetMs: number; name: string } | null {
+  if (state.groups && state.groups.length > 0) {
+    const weeklyBuckets: { fraction: number; resetMs: number; name: string }[] = [];
+    for (const g of state.groups) {
+      const wb = g.buckets.find(
+        b => b.window === 'weekly' || b.bucketId.toLowerCase().includes('weekly') || b.displayName.toLowerCase().includes('weekly')
+      );
+      if (wb) {
+        weeklyBuckets.push({
+          fraction: wb.remainingFraction,
+          resetMs: wb.resetTimestamp,
+          name: g.displayName.replace(' Models', '').replace(' and ', '/'),
+        });
+      }
+    }
+    if (weeklyBuckets.length > 0) {
+      weeklyBuckets.sort((a, b) => a.fraction - b.fraction);
+      return weeklyBuckets[0];
+    }
+  }
+
+  // Fallback to models
+  const modelsWithWeekly = state.models.filter(m => m.weeklyRemainingFraction !== undefined);
+  if (modelsWithWeekly.length > 0) {
+    modelsWithWeekly.sort((a, b) => (a.weeklyRemainingFraction ?? 1) - (b.weeklyRemainingFraction ?? 1));
+    const lowest = modelsWithWeekly[0];
+    return {
+      fraction: lowest.weeklyRemainingFraction ?? 1,
+      resetMs: lowest.weeklyResetTimestamp ?? Date.now(),
+      name: lowest.groupName || 'Weekly',
+    };
+  }
+
+  return null;
+}
+
+/** Find the weekly quota pool for the active model or lowest across groups */
+function activeWeeklyInfo(state: QuotaState, targetModel?: ModelQuota): { fraction: number; resetMs: number; name: string } | null {
+  if (targetModel && targetModel.weeklyRemainingFraction !== undefined) {
+    return {
+      fraction: targetModel.weeklyRemainingFraction,
+      resetMs: targetModel.weeklyResetTimestamp ?? Date.now(),
+      name: targetModel.groupName || 'Weekly',
+    };
+  }
+
+  if (targetModel && state.groups) {
+    const lower = targetModel.displayName.toLowerCase();
+    const group = state.groups.find(g => {
+      const gName = g.displayName.toLowerCase();
+      if (lower.includes('gemini') && gName.includes('gemini')) { return true; }
+      if ((lower.includes('claude') || lower.includes('gpt') || lower.includes('sonnet') || lower.includes('opus')) &&
+          (gName.includes('claude') || gName.includes('gpt') || gName.includes('other'))) {
+        return true;
+      }
+      return false;
+    });
+    if (group) {
+      const wb = group.buckets.find(b => b.window === 'weekly' || b.bucketId.toLowerCase().includes('weekly') || b.displayName.toLowerCase().includes('weekly'));
+      if (wb) {
+        return {
+          fraction: wb.remainingFraction,
+          resetMs: wb.resetTimestamp,
+          name: group.displayName.replace(' Models', '').replace(' and ', '/'),
+        };
+      }
+    }
+  }
+
+  return lowestWeeklyInfo(state);
+}
+
 /** Build rich markdown tooltip shared by all modes */
 function buildTooltip(state: QuotaState, mode: StatusBarMode): vscode.MarkdownString {
   const now = Date.now();
@@ -107,19 +180,84 @@ function buildTooltip(state: QuotaState, mode: StatusBarMode): vscode.MarkdownSt
     `## $(pulse) Antigravity Quota Tracker`,
     `*Mode: **${modeLabel}** — click status bar to cycle*`,
     '',
-    `| Model | Remaining | Reset in |`,
-    `|---|:---:|:---:|`,
   ];
 
+  // Active Agent Model callout
+  const active = state.activeModelId
+    ? state.models.find(m => m.modelId === state.activeModelId || m.displayName === state.activeModelName)
+    : null;
+
+  if (active) {
+    const aRem = remPct(active);
+    const aReset = countdown(active.resetTimestamp);
+    const aWInfo = activeWeeklyInfo(state, active);
+    const aWStr = aWInfo ? ` · 📅 Weekly: **${Math.round(aWInfo.fraction * 100)}%** (${aWInfo.name})` : '';
+    lines.push(`> ⚡ **Active Agent Model:** **${active.displayName}**`);
+    lines.push(`> 5-Hour Quota: **${aRem}%** remaining (↺ in ${aReset})${aWStr}`);
+    lines.push('');
+  }
+
+  // 1. Weekly Quotas (Shared Pools) section
+  if (state.groups && state.groups.length > 0) {
+    lines.push(`### 📅 Weekly Limits (Shared Pools)`);
+    lines.push(`| Shared Pool | Weekly Remaining | 5-Hour Window | Weekly Reset |`);
+    lines.push(`|---|:---:|:---:|:---:|`);
+
+    for (const g of state.groups) {
+      const weeklyBucket = g.buckets.find(
+        b => b.window === 'weekly' || b.bucketId.toLowerCase().includes('weekly') || b.displayName.toLowerCase().includes('weekly')
+      );
+      const fiveHBucket = g.buckets.find(
+        b => b.window === '5h' || b.bucketId.toLowerCase().includes('5h') || b.displayName.toLowerCase().includes('5-hour')
+      );
+
+      const wFrac = weeklyBucket ? weeklyBucket.remainingFraction : 1;
+      const wPct = Math.round(wFrac * 100);
+      const wBar = miniBar(wFrac, 5);
+      const wDot = dot(wFrac);
+      const wReset = weeklyBucket ? countdown(weeklyBucket.resetTimestamp) : '—';
+
+      const fPct = fiveHBucket ? `${Math.round(fiveHBucket.remainingFraction * 100)}%` : '—';
+      const isPoolActive = active && (
+        (active.displayName.toLowerCase().includes('gemini') && g.displayName.toLowerCase().includes('gemini')) ||
+        (!active.displayName.toLowerCase().includes('gemini') && !g.displayName.toLowerCase().includes('gemini'))
+      );
+      const poolName = isPoolActive ? `**${g.displayName}** ★` : g.displayName;
+
+      lines.push(`| ${wDot} ${poolName} | ${wBar} ${wPct}% | ${fPct} | ↺ in ${wReset} |`);
+    }
+    lines.push('');
+  }
+
+  // 2. Individual Model table
+  lines.push(`### 🤖 Model Quotas`);
+  const hasWeekly = state.models.some(m => m.weeklyRemainingFraction !== undefined);
+  if (hasWeekly) {
+    lines.push(`| Model | 5h Left | Weekly Left | 5h Reset |`);
+    lines.push(`|---|:---:|:---:|:---:|`);
+  } else {
+    lines.push(`| Model | Remaining | Reset in |`);
+    lines.push(`|---|:---:|:---:|`);
+  }
+
   for (const m of state.models) {
+    const isActive = active && m.modelId === active.modelId;
     const rem = remPct(m);
     const frac = remFraction(m);
     const d = dot(frac);
-    const bar = miniBar(frac, 6);
+    const bar = miniBar(frac, 5);
     const reset = countdown(m.resetTimestamp);
-    // Highlight exhausted or nearly exhausted
     const remStr = rem <= 5 ? `**${rem}%**` : `${rem}%`;
-    lines.push(`| ${d} ${m.displayName} | ${bar} ${remStr} | ${reset} |`);
+    const nameLabel = isActive ? `**${m.displayName}** ⚡` : m.displayName;
+
+    if (hasWeekly) {
+      const wFrac = m.weeklyRemainingFraction ?? 1;
+      const wPct = Math.round(wFrac * 100);
+      const wStr = wPct <= 10 ? `**${wPct}%**` : `${wPct}%`;
+      lines.push(`| ${d} ${nameLabel} | ${bar} ${remStr} | 📅 ${wStr} | ${reset} |`);
+    } else {
+      lines.push(`| ${d} ${nameLabel} | ${bar} ${remStr} | ${reset} |`);
+    }
   }
 
   lines.push('');
@@ -156,7 +294,8 @@ export class StatusBarController {
     this._visible = _service.settings.statusBarVisible;
     const cfg = vscode.workspace.getConfiguration('quotaTracker');
     this._item = this._createItem(readAlignment(cfg), readPriority(cfg));
-    this._render(this._service.state);
+    this._lastState = this._service.state;
+    this._render(this._lastState);
     if (this._visible) { this._item.show(); }
   }
 
@@ -248,31 +387,51 @@ export class StatusBarController {
     }
   }
 
-  // ── MINI  →  🟢 98% ↺5h ──────────────────────────────────
-  // Single dot, best-remaining model %, time to reset
+  // ── MINI  →  🟢 3.8H·93% · 📅98% ↺4h36m ────────────────
+  // Displays the active agent model chip, 5h remaining %, corresponding weekly pool %, and reset
   private _renderMini(state: QuotaState): void {
-    // Show the most-used (lowest remaining) model as the "watchdog"
     const worst = [...state.models].sort((a, b) => remFraction(a) - remFraction(b))[0];
-    const frac = remFraction(worst);
+    const active = state.activeModelId
+      ? state.models.find(m => m.modelId === state.activeModelId || m.displayName === state.activeModelName)
+      : null;
+    const target = active || worst;
+    if (!target) { return; }
+
+    const frac = remFraction(target);
     const rem = Math.round(frac * 100);
     const d = dot(frac);
-    const reset = countdown(worst.resetTimestamp);
-    const used = usedPct(worst);
+    const reset = countdown(target.resetTimestamp);
+    const used = usedPct(target);
+    const chip = shortChip(target.displayName);
 
-    this._item.text = `${d} ${rem}% ↺${reset}`;
-    this._item.backgroundColor = bgColor(used);
+    const wInfo = activeWeeklyInfo(state, target);
+    if (wInfo) {
+      const wPct = Math.round(wInfo.fraction * 100);
+      const wUsed = Math.round((1 - wInfo.fraction) * 100);
+      this._item.text = `${d} ${chip}·${rem}% · 📅${wPct}% ↺${reset}`;
+      this._item.backgroundColor = bgColor(Math.max(used, wUsed));
+    } else {
+      this._item.text = `${d} ${chip}·${rem}% ↺${reset}`;
+      this._item.backgroundColor = bgColor(used);
+    }
+
     this._item.tooltip = buildTooltip(state, 'compact');
   }
 
-  // ── SHORT  →  🟢 3.8FH·98  🟢 Sn4T·∞ ────────────────────
-  // Top 3 chips with dot + short name + remaining %
+  // ── SHORT  →  🟢 3.8H·93%  🟢 Sn4T·65%  📅98% ↺4h36m ───
+  // Active model first, followed by other models / watchdog, plus active weekly pool
   private _renderShort(state: QuotaState): void {
-    // Pick top 3 by lowest remaining (most interesting to watch)
-    const top = [...state.models]
-      .sort((a, b) => remFraction(a) - remFraction(b))
-      .slice(0, 3);
+    const active = state.activeModelId
+      ? state.models.find(m => m.modelId === state.activeModelId || m.displayName === state.activeModelName)
+      : null;
 
-    const chips = top.map(m => {
+    const others = [...state.models]
+      .filter(m => !active || m.modelId !== active.modelId)
+      .sort((a, b) => remFraction(a) - remFraction(b));
+
+    const displayModels = active ? [active, ...others.slice(0, 2)] : others.slice(0, 3);
+
+    const chips = displayModels.map(m => {
       const frac = remFraction(m);
       const rem = Math.round(frac * 100);
       const d = dot(frac);
@@ -281,25 +440,57 @@ export class StatusBarController {
       return `${d}${chip}·${remStr}`;
     });
 
-    const reset = countdown(state.models[0].resetTimestamp);
+    const target = active || displayModels[0];
+    const reset = countdown(target ? target.resetTimestamp : state.models[0].resetTimestamp);
     const worstUsed = usedPct([...state.models].sort((a, b) => remFraction(a) - remFraction(b))[0]);
+    const wInfo = activeWeeklyInfo(state, target);
 
-    this._item.text = `${chips.join('  ')}  ↺${reset}`;
-    this._item.backgroundColor = bgColor(worstUsed);
+    if (wInfo) {
+      const wPct = Math.round(wInfo.fraction * 100);
+      const wUsed = Math.round((1 - wInfo.fraction) * 100);
+      this._item.text = `${chips.join('  ')}  📅${wPct}%  ↺${reset}`;
+      this._item.backgroundColor = bgColor(Math.max(worstUsed, wUsed));
+    } else {
+      this._item.text = `${chips.join('  ')}  ↺${reset}`;
+      this._item.backgroundColor = bgColor(worstUsed);
+    }
+
     this._item.tooltip = buildTooltip(state, 'expanded');
   }
 
-  // ── DETAILED  →  full chip row + rich tooltip ─────────────
-  // All models as tiny dots in the bar, full table in tooltip
+  // ── DETAILED  →  dots row + active model tag + weekly groups + rich tooltip ──
   private _renderDetailed(state: QuotaState): void {
-    // Spark row: one colored dot per model
+    const active = state.activeModelId
+      ? state.models.find(m => m.modelId === state.activeModelId || m.displayName === state.activeModelName)
+      : null;
+    const activeTag = active ? `[${shortChip(active.displayName)}] ` : '';
+
     const dots = state.models.map(m => dot(remFraction(m))).join('');
-    const reset = countdown(state.models[0].resetTimestamp);
+    const reset = countdown(active ? active.resetTimestamp : state.models[0].resetTimestamp);
     const total = state.models.length;
     const exhausted = state.models.filter(m => remFraction(m) <= 0.05).length;
     const exhaustedStr = exhausted > 0 ? ` ⚡${exhausted}` : '';
 
-    this._item.text = `$(pulse) ${dots} ${total}M${exhaustedStr} ↺${reset}`;
+    let weeklyTag = '';
+    if (state.groups && state.groups.length > 0) {
+      const parts = state.groups.map(g => {
+        const wb = g.buckets.find(
+          b => b.window === 'weekly' || b.bucketId.toLowerCase().includes('weekly') || b.displayName.toLowerCase().includes('weekly')
+        );
+        const label = g.displayName.toLowerCase().includes('gemini') ? 'Gem' : '3P';
+        return wb ? `${label}:${Math.round(wb.remainingFraction * 100)}%` : '';
+      }).filter(Boolean);
+      if (parts.length > 0) {
+        weeklyTag = ` | 📅 ${parts.join(' ')}`;
+      }
+    } else {
+      const wInfo = activeWeeklyInfo(state, active || undefined);
+      if (wInfo) {
+        weeklyTag = ` | 📅 W:${Math.round(wInfo.fraction * 100)}%`;
+      }
+    }
+
+    this._item.text = `$(pulse) ${activeTag}${dots} ${total}M${exhaustedStr}${weeklyTag} ↺${reset}`;
     this._item.backgroundColor = undefined;
     this._item.tooltip = buildTooltip(state, 'detailed');
   }

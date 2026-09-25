@@ -118,6 +118,49 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  // Select focus model or auto-detect
+  context.subscriptions.push(
+    vscode.commands.registerCommand('quotaTracker.selectFocusModel', async () => {
+      const models = dataService.state.models || [];
+      const currentActive = dataService.state.activeModelId;
+
+      const items: vscode.QuickPickItem[] = [
+        {
+          label: '$(sparkle) Auto-Detect (Follow Active Agent Model)',
+          description: 'Automatically switches to whatever model the agent is currently using',
+          detail: 'Recommended',
+        },
+        ...models.map(m => ({
+          label: `$(robot) ${m.displayName}`,
+          description: `${Math.round((1 - (m.requests.used / m.requests.limit)) * 100)}% remaining${m.modelId === currentActive ? ' (active)' : ''}`,
+          detail: m.groupName ? `Shared Pool: ${m.groupName}` : undefined,
+        })),
+      ];
+
+      const selected = await vscode.window.showQuickPick(items, {
+        title: 'Quota Tracker — Select Model Focus',
+        placeHolder: 'Select a model to pin, or choose Auto-Detect',
+      });
+
+      if (!selected) { return; }
+
+      if (selected.label.includes('Auto-Detect')) {
+        await vscode.workspace.getConfiguration('quotaTracker')
+          .update('focusModel', 'auto', vscode.ConfigurationTarget.Global);
+        dataService.setActiveModel(null);
+        vscode.window.setStatusBarMessage('$(sparkle) Quota tracker set to Auto-Detect model', 2000);
+      } else {
+        const found = models.find(m => selected.label.includes(m.displayName));
+        if (found) {
+          await vscode.workspace.getConfiguration('quotaTracker')
+            .update('focusModel', found.modelId, vscode.ConfigurationTarget.Global);
+          dataService.setActiveModel(found.modelId);
+          vscode.window.setStatusBarMessage(`$(pin) Quota tracker focused on ${found.displayName}`, 2000);
+        }
+      }
+    })
+  );
+
   // React to Configuration Changes
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
@@ -143,6 +186,15 @@ export function activate(context: vscode.ExtensionContext): void {
       const s = dataService.settings;
       if (s.refreshInterval > 0 && s.refreshInterval < 300) {
         dataService.refresh();
+      }
+    })
+  );
+
+  // ── Fast Active Model Detection on Window Focus ───────────
+  context.subscriptions.push(
+    vscode.window.onDidChangeWindowState(e => {
+      if (e.focused) {
+        dataService.checkActiveModel();
       }
     })
   );

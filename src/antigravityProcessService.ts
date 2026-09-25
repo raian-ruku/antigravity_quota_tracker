@@ -12,6 +12,31 @@ export interface AntigravitySession {
   isHttps: boolean;
 }
 
+export interface ConnectUserQuotaSummaryBucket {
+  bucketId?: string;
+  displayName?: string;
+  description?: string;
+  window?: string;
+  remainingFraction?: number;
+  remaining?: { case?: string; value?: number };
+  remaining_fraction?: number;
+  resetTime?: string;
+  reset_time?: string;
+}
+
+export interface ConnectUserQuotaSummaryGroup {
+  displayName?: string;
+  description?: string;
+  buckets?: ConnectUserQuotaSummaryBucket[];
+}
+
+export interface ConnectUserQuotaSummaryResponse {
+  response?: {
+    groups?: ConnectUserQuotaSummaryGroup[];
+    description?: string;
+  };
+}
+
 export interface ConnectUserStatusResponse {
   userStatus?: {
     email?: string;
@@ -35,11 +60,23 @@ export interface ConnectUserStatusResponse {
         label: string;
         modelId: string;
         isRecommended?: boolean;
+        modelOrAlias?: {
+          model?: string;
+          alias?: string;
+        };
         quotaInfo?: {
           remainingFraction?: number;
           resetTime?: string;
         };
       }>;
+      defaultOverrideModelConfig?: {
+        modelOrAlias?: {
+          model?: string;
+          alias?: string;
+        };
+        modelId?: string;
+        model?: string;
+      };
     };
   };
 }
@@ -217,3 +254,61 @@ export async function fetchLocalUserStatus(session: AntigravitySession): Promise
     req.end();
   });
 }
+
+/**
+ * Fetches the user quota summary (weekly and window quotas grouped by model family)
+ * from local Antigravity Language Server via Connect RPC.
+ */
+export async function fetchLocalUserQuotaSummary(
+  session: AntigravitySession
+): Promise<ConnectUserQuotaSummaryResponse | null> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({
+      forceRefresh: true,
+    });
+
+    const req = https.request(
+      {
+        hostname: "127.0.0.1",
+        port: session.port,
+        path: "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+        method: "POST",
+        rejectUnauthorized: false,
+        timeout: 5000,
+        headers: {
+          "Content-Type": "application/json",
+          "Connect-Protocol-Version": "1",
+          "x-codeium-csrf-token": session.csrfToken,
+          "X-CSRF-Token": session.csrfToken,
+          "Content-Length": Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk: Buffer | string) => (body += chunk));
+        res.on("end", () => {
+          if (res.statusCode === 200) {
+            try {
+              const data = JSON.parse(body) as ConnectUserQuotaSummaryResponse;
+              resolve(data);
+            } catch (e) {
+              reject(new Error(`Failed to parse JSON: ${e}`));
+            }
+          } else {
+            reject(new Error(`Server returned HTTP ${res.statusCode}: ${body}`));
+          }
+        });
+      }
+    );
+
+    req.on("error", (err) => reject(err));
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Request timed out"));
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
+

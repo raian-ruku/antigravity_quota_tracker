@@ -262,6 +262,22 @@ body {
   box-shadow: 0 0 12px rgba(123,140,255,0.2);
 }
 
+.model-tab.agent-active {
+  border-color: rgba(0, 255, 148, 0.45);
+}
+
+.model-tab.agent-active.active {
+  box-shadow: 0 0 14px rgba(0, 255, 148, 0.25);
+  border-color: rgba(0, 255, 148, 0.6);
+}
+
+.tab-active-indicator {
+  font-size: 9px;
+  color: #00FF94;
+  margin-left: 3px;
+  text-shadow: 0 0 6px rgba(0, 255, 148, 0.6);
+}
+
 /* ── Demo Banner ───────────────────────────────────────────── */
 .demo-banner {
   background: rgba(255,179,71,0.1);
@@ -473,6 +489,18 @@ body {
   margin-top: 3px;
 }
 
+.metric-card.full-span {
+  grid-column: 1 / -1;
+  padding: 10px 12px;
+}
+
+.reset-horizontal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
 .metric-tier.free       { color: var(--accent-4); border-color: rgba(0,255,148,0.25); background: rgba(0,255,148,0.1); }
 .metric-tier.pro        { color: var(--accent-1); border-color: rgba(123,140,255,0.25); background: rgba(123,140,255,0.1); }
 .metric-tier.enterprise { color: var(--accent-2); border-color: rgba(0,212,255,0.25); background: rgba(0,212,255,0.1); }
@@ -480,7 +508,7 @@ body {
 /* Reset ring canvas */
 .reset-ring-canvas {
   display: block;
-  margin-top: 2px;
+  margin-top: 0;
 }
 
 /* ── Timeline Section ──────────────────────────────────────── */
@@ -513,6 +541,161 @@ body {
   height: 60px;
 }
 
+/* ── Weekly Quotas Section (Shared Pools) ───────────────────── */
+.weekly-section {
+  margin-bottom: 8px;
+}
+
+.weekly-header-title, .section-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.weekly-pools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.weekly-pool-card {
+  background: rgba(255, 255, 255, 0.032);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  transition: all var(--transition-fast);
+}
+
+.weekly-pool-card:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.weekly-pool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.weekly-pool-title-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.pool-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.weekly-pool-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.weekly-pool-badge {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: rgba(255, 179, 71, 0.1);
+  border: 1px solid rgba(255, 179, 71, 0.25);
+  color: var(--accent-5);
+}
+
+.pool-limit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 7px;
+}
+
+.pool-limit-row.five-h-row {
+  margin-bottom: 0;
+  opacity: 0.88;
+}
+
+.pool-limit-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 9.5px;
+}
+
+.pool-limit-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-sub);
+  font-weight: 500;
+}
+
+.pool-limit-val {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+}
+
+.pool-bar-track {
+  height: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+  margin: 2px 0;
+}
+
+.pool-bar-track.mini {
+  height: 3px;
+}
+
+.pool-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.8s cubic-bezier(0.34, 1.1, 0.64, 1);
+}
+
+.pool-limit-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 8.5px;
+  color: var(--text-dim);
+}
+
+.pool-countdown-tag {
+  color: var(--text-sub);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-models-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.pool-model-pill {
+  font-size: 8.5px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
 /* ── All Models List ───────────────────────────────────────── */
 .models-section { margin-bottom: 8px; }
 
@@ -521,7 +704,7 @@ body {
 .model-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .model-row-name {
@@ -569,6 +752,17 @@ body {
   min-width: 30px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.model-row-weekly {
+  font-size: 8.5px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .model-row-cost {

@@ -34,13 +34,20 @@ const ringModel     = $('ringModel');
 const reqUsed       = $('reqUsed');
 const reqLimit      = $('reqLimit');
 const reqReset      = $('reqReset');
+const weeklyRingSep = $('weeklyRingSep');
+const weeklyRingStat = $('weeklyRingStat');
+const weeklyRingReset = $('weeklyRingReset');
 const tokensInVal   = $('tokensInVal');
 const tokensInBar   = $('tokensInBar');
 const tokensOutVal  = $('tokensOutVal');
 const tokensOutBar  = $('tokensOutBar');
 const costVal       = $('costVal');
 const tierBadge     = $('tierBadge');
+const weeklyVal     = $('weeklyVal');
+const weeklyBar     = $('weeklyBar');
 const resetCountdown = $('resetCountdown');
+const weeklySection = $('weeklySection');
+const weeklyPoolsList = $('weeklyPoolsList');
 const totalCost     = $('totalCost');
 const modelsList    = $('modelsList');
 const sparklineCanvas = $('sparkline');
@@ -128,11 +135,22 @@ function render() {
 
   if (!state.models?.length) { return; }
 
+  // Auto-focus active agent model unless user manually picked a tab
+  if (state.activeModelId && !window._userManualTabSelected) {
+    const detectedIdx = state.models.findIndex(
+      m => m.modelId === state.activeModelId || m.displayName === state.activeModelName
+    );
+    if (detectedIdx !== -1) {
+      activeModelIdx = detectedIdx;
+    }
+  }
+
   // Clamp active index
   if (activeModelIdx >= state.models.length) { activeModelIdx = 0; }
 
   renderModelTabs();
   renderPrimaryModel();
+  renderWeeklySection();
   renderModelsList();
   renderSparkline();
   renderTotalCost();
@@ -148,14 +166,23 @@ function renderDemoBanner() {
 function renderModelTabs() {
   modelTabs.innerHTML = '';
   state.models.forEach((m, i) => {
+    const isAgentActive = state.activeModelId === m.modelId || state.activeModelName === m.displayName;
     const btn = document.createElement('button');
-    btn.className = 'model-tab' + (i === activeModelIdx ? ' active' : '');
+    btn.className = 'model-tab' + (i === activeModelIdx ? ' active' : '') + (isAgentActive ? ' agent-active' : '');
     btn.textContent = m.displayName.replace('Gemini ', '');
+    if (isAgentActive) {
+      const badge = document.createElement('span');
+      badge.className = 'tab-active-indicator';
+      badge.textContent = ' ⚡';
+      btn.appendChild(badge);
+    }
     btn.setAttribute('role', 'tab');
     btn.setAttribute('aria-selected', String(i === activeModelIdx));
     btn.setAttribute('id', `tab-${m.modelId}`);
     btn.addEventListener('click', () => {
+      window._userManualTabSelected = true;
       activeModelIdx = i;
+      post({ type: 'selectModel', modelId: m.modelId });
       renderModelTabs();
       renderPrimaryModel();
       renderSparkline();
@@ -189,17 +216,43 @@ function renderPrimaryModel() {
   tokensOutVal.textContent = formatNum(m.tokensOut.used);
   tokensOutBar.style.setProperty('--pct', tokOutPct + '%');
 
-  // Cost
+  // Cost & Tier
   costVal.textContent = m.estimatedCostUsd < 0.01 ? 'Free' : `$${m.estimatedCostUsd.toFixed(2)}`;
   tierBadge.textContent = m.tier;
   tierBadge.className = `metric-tier ${m.tier}`;
+
+  // Weekly Quota Card & Ring
+  if (m.weeklyRemainingFraction !== undefined) {
+    const wPct = Math.round(m.weeklyRemainingFraction * 100);
+    weeklyVal.textContent = `${wPct}% left`;
+    weeklyBar.style.setProperty('--pct', `${wPct}%`);
+    const wColor = wPct <= 10 ? '#FF6B9D' : wPct <= 30 ? '#FFB347' : '#00FF94';
+    weeklyBar.style.setProperty('--c', wColor);
+
+    if (weeklyRingStat && weeklyRingSep) {
+      weeklyRingStat.style.display = 'flex';
+      weeklyRingSep.style.display = 'block';
+      if (m.weeklyResetTimestamp) {
+        weeklyRingReset.textContent = formatCountdown(m.weeklyResetTimestamp - Date.now());
+      } else {
+        weeklyRingReset.textContent = '—';
+      }
+    }
+  } else {
+    weeklyVal.textContent = '100% left';
+    weeklyBar.style.setProperty('--pct', '100%');
+    if (weeklyRingStat && weeklyRingSep) {
+      weeklyRingStat.style.display = 'none';
+      weeklyRingSep.style.display = 'none';
+    }
+  }
 
   // Draw donut
   drawDonut(donutCanvas, pct, pctClass, MODEL_COLORS[activeModelIdx % MODEL_COLORS.length]);
 
   // Reset ring
   drawResetRing(resetRingCanvas, m.resetTimestamp);
-  updateCountdown(m.resetTimestamp);
+  updateCountdown(m.resetTimestamp, m.weeklyResetTimestamp);
 }
 
 // ── Countdown loop ───────────────────────────────────────────
@@ -209,25 +262,148 @@ function startCountdownLoop() {
     if (!state?.models?.length) { return; }
     const m = state.models[activeModelIdx];
     if (!m) { return; }
-    updateCountdown(m.resetTimestamp);
+    updateCountdown(m.resetTimestamp, m.weeklyResetTimestamp);
     drawResetRing(resetRingCanvas, m.resetTimestamp);
   }, 1000);
 }
 
-function updateCountdown(resetMs) {
+function updateCountdown(resetMs, weeklyResetMs) {
   const diff = resetMs - Date.now();
-  reqReset.textContent      = formatCountdown(diff);
+  reqReset.textContent       = formatCountdown(diff);
   resetCountdown.textContent = formatCountdown(diff);
+  if (weeklyResetMs && weeklyRingReset) {
+    weeklyRingReset.textContent = formatCountdown(weeklyResetMs - Date.now());
+  }
+  // Update live countdown tags in weekly pools section
+  document.querySelectorAll('[data-reset-timestamp]').forEach(el => {
+    const ts = Number(el.getAttribute('data-reset-timestamp'));
+    if (ts) {
+      el.textContent = `↺ ${formatCountdown(ts - Date.now())}`;
+    }
+  });
 }
 
 function formatCountdown(diffMs) {
   if (diffMs <= 0) { return 'Now'; }
-  const h = Math.floor(diffMs / 3600000);
+  const d = Math.floor(diffMs / 86400000);
+  const h = Math.floor((diffMs % 86400000) / 3600000);
   const m = Math.floor((diffMs % 3600000) / 60000);
   const s = Math.floor((diffMs % 60000) / 1000);
+  if (d > 0) { return `${d}d ${h}h`; }
   if (h > 0) { return `${h}h ${m}m`; }
   if (m > 0) { return `${m}m ${s}s`; }
   return `${s}s`;
+}
+
+// ── Weekly Quotas Section (Shared Pools) ─────────────────────
+function renderWeeklySection() {
+  if (!weeklyPoolsList) return;
+  const groups = state.groups || [];
+  if (groups.length === 0) {
+    weeklySection.style.display = 'none';
+    return;
+  }
+  weeklySection.style.display = 'block';
+  weeklyPoolsList.innerHTML = '';
+
+  groups.forEach((g) => {
+    const weeklyBucket = g.buckets.find(
+      b => b.window === 'weekly' || b.bucketId.toLowerCase().includes('weekly') || b.displayName.toLowerCase().includes('weekly')
+    );
+    const fiveHBucket = g.buckets.find(
+      b => b.window === '5h' || b.bucketId.toLowerCase().includes('5h') || b.displayName.toLowerCase().includes('5-hour')
+    );
+
+    const wFrac = weeklyBucket ? weeklyBucket.remainingFraction : 1.0;
+    const wPct = Math.round(wFrac * 100);
+    const wColor = wPct <= 10 ? '#FF6B9D' : wPct <= 30 ? '#FFB347' : '#00FF94';
+    const wReset = weeklyBucket ? weeklyBucket.resetTimestamp : 0;
+
+    const fFrac = fiveHBucket ? fiveHBucket.remainingFraction : 1.0;
+    const fPct = Math.round(fFrac * 100);
+    const fColor = fPct <= 10 ? '#FF6B9D' : fPct <= 30 ? '#FFB347' : '#00D4FF';
+    const fReset = fiveHBucket ? fiveHBucket.resetTimestamp : 0;
+
+    const card = document.createElement('div');
+    card.className = 'weekly-pool-card';
+
+    // Model chips
+    let modelsPills = '';
+    if (g.description) {
+      const mMatch = g.description.match(/Models within this group:\s*(.*)/i);
+      if (mMatch && mMatch[1]) {
+        const names = mMatch[1].split(/,\s*/);
+        modelsPills = `
+          <div class="pool-models-chips">
+            ${names.map(n => `<span class="pool-model-pill">${escapeHtml(n.trim())}</span>`).join('')}
+          </div>
+        `;
+      }
+    }
+
+    card.innerHTML = `
+      <div class="weekly-pool-header">
+        <div class="weekly-pool-title-group">
+          <div class="pool-status-dot" style="background:${wColor}; box-shadow:0 0 8px ${wColor}"></div>
+          <span class="weekly-pool-name">${escapeHtml(g.displayName)}</span>
+        </div>
+        <span class="weekly-pool-badge">SHARED POOL</span>
+      </div>
+
+      <!-- Weekly Limit -->
+      <div class="pool-limit-row">
+        <div class="pool-limit-meta">
+          <span class="pool-limit-label">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+              <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+            </svg>
+            Weekly Limit
+          </span>
+          <span class="pool-limit-val" style="color:${wColor}">${wPct}% left</span>
+        </div>
+        <div class="pool-bar-track">
+          <div class="pool-bar-fill" style="width:${wPct}%; background:${wColor}; box-shadow:0 0 6px ${wColor}"></div>
+        </div>
+        <div class="pool-limit-sub">
+          <span>Weekly Refresh</span>
+          <span class="pool-countdown-tag" data-reset-timestamp="${wReset}">↺ ${wReset ? formatCountdown(wReset - Date.now()) : '—'}</span>
+        </div>
+      </div>
+
+      <!-- 5-Hour Window -->
+      <div class="pool-limit-row five-h-row">
+        <div class="pool-limit-meta">
+          <span class="pool-limit-label">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+            </svg>
+            5h Window
+          </span>
+          <span class="pool-limit-val" style="color:${fColor}">${fPct}% left</span>
+        </div>
+        <div class="pool-bar-track mini">
+          <div class="pool-bar-fill" style="width:${fPct}%; background:${fColor}"></div>
+        </div>
+        <div class="pool-limit-sub">
+          <span>Window Reset</span>
+          <span class="pool-countdown-tag" data-reset-timestamp="${fReset}">↺ ${fReset ? formatCountdown(fReset - Date.now()) : '—'}</span>
+        </div>
+      </div>
+
+      ${modelsPills}
+    `;
+
+    weeklyPoolsList.appendChild(card);
+  });
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 // ── All Models List ──────────────────────────────────────────
@@ -236,16 +412,21 @@ function renderModelsList() {
   state.models.forEach((m, i) => {
     const pct = Math.round(pctOf(m.requests));
     const [c1, c2] = MODEL_COLORS[i % MODEL_COLORS.length];
+    const wFrac = m.weeklyRemainingFraction;
+    const wPct = wFrac !== undefined ? Math.round(wFrac * 100) : null;
+    const wColor = wPct !== null ? (wPct <= 10 ? '#FF6B9D' : wPct <= 30 ? '#FFB347' : '#00FF94') : '';
+
     const row = document.createElement('div');
     row.className = 'model-row';
     row.innerHTML = `
-      <div class="model-row-name">${m.displayName.replace('Gemini ', '')}</div>
+      <div class="model-row-name">${escapeHtml(m.displayName.replace('Gemini ', ''))}</div>
       <div class="model-row-bar-wrap">
         <div class="model-row-bar"
              style="width:${pct}%; background: linear-gradient(90deg, ${c1}, ${c2});">
         </div>
       </div>
       <div class="model-row-pct">${pct}%</div>
+      ${wPct !== null ? `<div class="model-row-weekly" style="color:${wColor}">W:${wPct}%</div>` : ''}
       <div class="model-row-cost">${m.estimatedCostUsd < 0.01 ? '' : '$' + m.estimatedCostUsd.toFixed(2)}</div>
     `;
     modelsList.appendChild(row);

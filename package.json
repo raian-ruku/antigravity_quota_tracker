@@ -51,6 +51,12 @@
         "title": "Configure Status Bar Position",
         "category": "Quota Tracker",
         "icon": "$(move)"
+      },
+      {
+        "command": "quotaTracker.selectFocusModel",
+        "title": "Select Focused Model (or Auto-Detect)",
+        "category": "Quota Tracker",
+        "icon": "$(sparkle)"
       }
     ],
     "keybindings": [
@@ -137,6 +143,11 @@
           "minimum": 0,
           "maximum": 10000,
           "description": "Priority controls position within the chosen side. Left side: higher = further left. Right side: higher = further right. Use 'Quota Tracker: Configure Status Bar Position' command to change interactively."
+        },
+        "quotaTracker.focusModel": {
+          "type": "string",
+          "default": "auto",
+          "description": "Which model to focus in the status bar. 'auto' automatically tracks whatever model is currently active in the Antigravity Agent, or you can specify a specific model ID."
         }
       }
     }

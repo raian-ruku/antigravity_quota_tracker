@@ -17,6 +17,22 @@ export interface TokenMetrics {
   limit: number;
 }
 
+export interface QuotaBucket {
+  bucketId: string;
+  displayName: string;
+  description?: string;
+  window?: 'weekly' | '5h' | string;
+  remainingFraction: number; // 0.0 to 1.0
+  usedPercent: number;        // 0 to 100
+  resetTimestamp: number;     // Unix ms
+}
+
+export interface QuotaGroup {
+  displayName: string;
+  description?: string;
+  buckets: QuotaBucket[];
+}
+
 export interface ModelQuota {
   modelId: ModelId;
   displayName: string;
@@ -25,8 +41,12 @@ export interface ModelQuota {
   tokensIn: TokenMetrics;
   tokensOut: TokenMetrics;
   estimatedCostUsd: number;
-  resetTimestamp: number; // Unix ms
+  resetTimestamp: number; // Unix ms (5h window)
   lastUpdated: number;    // Unix ms
+  // Weekly quota & group info:
+  weeklyRemainingFraction?: number;
+  weeklyResetTimestamp?: number;
+  groupName?: string;
 }
 
 export interface QuotaSnapshot {
@@ -38,11 +58,15 @@ export interface QuotaSnapshot {
 
 export interface QuotaState {
   models: ModelQuota[];
-  history: Record<ModelId, QuotaSnapshot[]>; // last 24h snapshots
+  groups?: QuotaGroup[];
+  activeModelId?: string;
+  activeModelName?: string;
+  history: Record<string, QuotaSnapshot[]>; // last 24h snapshots
   totalCostUsd: number;
   isLoading: boolean;
   error: string | null;
   lastFetched: number | null;
+  userTierName?: string;
 }
 
 export type StatusBarMode = 'compact' | 'expanded' | 'detailed';
@@ -52,6 +76,7 @@ export interface ExtensionSettings {
   refreshInterval: number; // seconds, 0 = manual
   statusBarMode: StatusBarMode;
   statusBarVisible: boolean;
+  focusModel: string; // 'auto' or modelId
 }
 
 // Messages from extension → webview
@@ -66,4 +91,5 @@ export type WebviewMessage =
   | { type: 'refresh' }
   | { type: 'setApiKey'; key: string }
   | { type: 'setRefreshInterval'; seconds: number }
+  | { type: 'selectModel'; modelId: string }
   | { type: 'ready' };
