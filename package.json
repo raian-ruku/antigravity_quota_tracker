@@ -4,7 +4,8 @@
   "description": "Track Antigravity model usage quotas with a beautiful Liquid Glass UI",
   "version": "1.0.0",
   "publisher": "Raian Ruku",
-  "repository": "",
+  "repository": "https://github.com/raian-ruku/antigravity_quota_tracker",
+  "homepage": "https://github.com/raian-ruku/antigravity_quota_tracker",
   "engines": {
     "vscode": "^1.85.0"
   },
