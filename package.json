@@ -1,0 +1,155 @@
+{
+  "name": "antigravity-quota-tracker",
+  "displayName": "Antigravity Quota Tracker",
+  "description": "Track Antigravity model usage quotas with a beautiful Liquid Glass UI",
+  "version": "1.0.0",
+  "publisher": "Raian Ruku",
+  "repository": "",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "icon": "media/icons/icon-128.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "quotaTracker.openPanel",
+        "title": "Open Quota Dashboard",
+        "category": "Quota Tracker",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "quotaTracker.refresh",
+        "title": "Refresh Now",
+        "category": "Quota Tracker",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "quotaTracker.cycleMode",
+        "title": "Cycle Status Bar Mode",
+        "category": "Quota Tracker"
+      },
+      {
+        "command": "quotaTracker.toggleStatusBar",
+        "title": "Toggle Status Bar Item",
+        "category": "Quota Tracker"
+      },
+      {
+        "command": "quotaTracker.setApiKey",
+        "title": "Set API Key",
+        "category": "Quota Tracker"
+      },
+      {
+        "command": "quotaTracker.configurePosition",
+        "title": "Configure Status Bar Position",
+        "category": "Quota Tracker",
+        "icon": "$(move)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "quotaTracker.openPanel",
+        "key": "ctrl+shift+q",
+        "mac": "cmd+shift+q"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "quotaTracker",
+          "title": "Quota Tracker",
+          "icon": "media/icons/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "quotaTracker": [
+        {
+          "type": "webview",
+          "id": "quotaTracker.panel",
+          "name": "Antigravity Quotas"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Antigravity Quota Tracker",
+      "properties": {
+        "quotaTracker.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Antigravity API key for fetching quota data"
+        },
+        "quotaTracker.refreshInterval": {
+          "type": "number",
+          "default": 60,
+          "enum": [
+            30,
+            60,
+            300,
+            0
+          ],
+          "enumDescriptions": [
+            "30 seconds",
+            "1 minute",
+            "5 minutes",
+            "Manual only"
+          ],
+          "description": "Auto-refresh interval in seconds"
+        },
+        "quotaTracker.statusBarMode": {
+          "type": "string",
+          "default": "compact",
+          "enum": [
+            "compact",
+            "expanded",
+            "detailed"
+          ],
+          "description": "Status bar display mode"
+        },
+        "quotaTracker.statusBarVisible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show quota info in the status bar"
+        },
+        "quotaTracker.statusBarAlignment": {
+          "type": "string",
+          "default": "Left",
+          "enum": [
+            "Left",
+            "Right"
+          ],
+          "enumDescriptions": [
+            "Activity bar side — pairs with higher priority numbers",
+            "Notifications/clock side — pairs with higher priority numbers"
+          ],
+          "description": "Which side of the status bar to show the quota item. Use 'Quota Tracker: Configure Status Bar Position' command to change interactively."
+        },
+        "quotaTracker.statusBarPriority": {
+          "type": "number",
+          "default": 100,
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "Priority controls position within the chosen side. Left side: higher = further left. Right side: higher = further right. Use 'Quota Tracker: Configure Status Bar Position' command to change interactively."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node build.js",
+    "watch": "node build.js --watch",
+    "compile": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.0.0"
+  }
+}
